@@ -1,11 +1,7 @@
-import OpenAI from 'openai'
-import { NextResponse } from 'next/server'
+import OpenAI from 'openai';
+import { NextResponse } from 'next/server';
+import { supabase } from '@/lib/supabaseClient';
 
-const roomTemperatures: Record<string, number> = {
-  bedroom: 22,
-  livingroom: 24,
-  kitchen: 23,
-}
 
 const functions = [
   {
@@ -16,8 +12,7 @@ const functions = [
       properties: {
         room: {
           type: 'string',
-          description:
-            'The name of the room (e.g., bedroom, livingroom, kitchen).',
+          description: 'The name of the room (e.g., bedroom, livingroom, kitchen).',
         },
       },
       required: ['room'],
@@ -31,8 +26,7 @@ const functions = [
       properties: {
         room: {
           type: 'string',
-          description:
-            'The name of the room (e.g., bedroom, livingroom, kitchen).',
+          description: 'The name of the room (e.g., bedroom, livingroom, kitchen).',
         },
         temperature: {
           type: 'number',
@@ -42,14 +36,14 @@ const functions = [
       required: ['room', 'temperature'],
     },
   },
-]
+];
 
 export async function POST(req: Request) {
   try {
-    const { userMessage } = await req.json()
-    console.log('Message received:', userMessage)
+    const { userMessage } = await req.json();
+    console.log('Message received:', userMessage);
 
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! })
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
     const systemPrompt = `
       You are a smart home assistant that manages room temperatures.
@@ -65,7 +59,8 @@ export async function POST(req: Request) {
         Assistant: Calls "set_temperature" with { "room": "livingroom", "temperature": 25 }.
       - User: "Can you lower the temperature in the kitchen?"
         Assistant: Asks: "To what temperature would you like me to set the kitchen?".
-    `
+    `;
+
 
     const response = await openai.chat.completions.create({
       model: 'gpt-4-turbo',
@@ -74,50 +69,64 @@ export async function POST(req: Request) {
         { role: 'user', content: userMessage },
       ],
       functions: functions,
-    })
+    });
 
-    const message = response.choices[0].message
+    const message = response.choices[0].message;
 
+   
     if (message.function_call) {
-      const functionName = message.function_call.name
-      const args = JSON.parse(message.function_call.arguments)
+      const functionName = message.function_call.name;
+      const args = JSON.parse(message.function_call.arguments);
 
-      let functionResponse
+      let functionResponse;
 
       if (functionName === 'get_temperature') {
-        functionResponse = getTemperature(args.room)
+        functionResponse = await getTemperature(args.room);
       } else if (functionName === 'set_temperature') {
-        functionResponse = setTemperature(args.room, args.temperature)
+        functionResponse = await setTemperature(args.room, args.temperature);
       } else {
-        functionResponse = 'Unknown function.'
+        functionResponse = 'Unknown function.';
       }
 
-      return NextResponse.json({ message: functionResponse })
+      return NextResponse.json({ message: functionResponse });
     }
 
-    return NextResponse.json({ message: message.content })
+    return NextResponse.json({ message: message.content });
   } catch (error) {
-    console.error('OpenAI API Error:', error)
+    console.error('OpenAI API Error:', error);
     return NextResponse.json(
       { message: 'Server error, please try again later.' },
       { status: 500 }
-    )
+    );
   }
 }
 
-function getTemperature(room: string): string {
-  if (roomTemperatures[room] !== undefined) {
-    return `The current temperature in ${room} is ${roomTemperatures[room]}°C.`
-  } else {
-    return `I don't have data for ${room}.`
+async function getTemperature(room: string): Promise<string> {
+  const { data, error } = await supabase
+    .from('room_temperatures')
+    .select('temperature')
+    .eq('room', room)
+    .single(); 
+  if (error || !data) {
+    console.error('Error fetching temperature from Supabase:', error);
+    return `❌ I don't have data for ${room}.`;
   }
+
+  return `🌡️ The current temperature in ${room} is ${data.temperature}°C.`;
 }
 
-function setTemperature(room: string, temperature: number): string {
-  if (roomTemperatures[room] !== undefined) {
-    roomTemperatures[room] = temperature
-    return `The temperature in ${room} has been updated to ${temperature}°C.`
-  } else {
-    return `I can't change the temperature of ${room}.`
+// Function to update temperature in Supabase
+async function setTemperature(room: string, temperature: number): Promise<string> {
+  const { error } = await supabase
+
+    .from('room_temperatures')
+    .upsert([{ room, temperature }], { onConflict: "room" }); // ✅ Correct format
+
+
+  if (error) {
+    console.error('Error updating temperature in Supabase:', error);
+    return `❌ Failed to update the temperature of ${room}.`;
   }
+
+  return `✅ The temperature in ${room} has been updated to ${temperature}°C in the database.`;
 }
