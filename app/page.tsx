@@ -1,9 +1,9 @@
-import Chatbot from '@/components/chatbot'
+import Login from './login/page'
 
 export default function Home() {
   return (
-    <div>
-      <Chatbot />
+    <div className='min-h-screen '>
+      <Login />
     </div>
   )
 }
