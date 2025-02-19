@@ -1,32 +1,65 @@
-import OpenAI from 'openai';
-import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabaseClient';
+import OpenAI from 'openai'
+import { NextResponse } from 'next/server'
+import { supabase } from '@/lib/supabaseClient'
 
-// Define ENUM for valid rooms
-const ROOMS = ["bedroom", "livingroom", "kitchen", "bathroom", "office"];
+
+async function getUserRooms(userId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('room_temperatures')
+    .select('room')
+    .eq('user_id', userId)
+
+  return error || !data ? [] : data.map((room) => room.room)
+}
+
+
+async function createRoom(userId: string, room: string) {
+  const userRooms = await getUserRooms(userId)
+
+  if (!userRooms.includes(room)) {
+    await supabase
+      .from('room_temperatures')
+      .insert([{ user_id: userId, room, temperature: 22 }]) 
+  }
+}
 
 export async function POST(req: Request) {
   try {
-    const { userMessage, userId } = await req.json();
-    console.log('Message received:', userMessage, 'from user:', userId);
+    const { userMessage, userId } = await req.json()
 
-    if (!userId) {
-      return NextResponse.json({ message: "❌ User not authenticated." }, { status: 401 });
+    if (!userId || typeof userId !== 'string') {
+      return NextResponse.json(
+        { message: '❌ User not authenticated or invalid ID.' },
+        { status: 401 }
+      )
     }
 
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+  
+    const userRooms = await getUserRooms(userId)
+
+    const systemPrompt = `
+    You are a smart home assistant that manages room temperatures per user.
+    - Available rooms for this user: ${userRooms.length > 0 ? userRooms.join(', ') : 'None'}.
+    - If the user asks for a temperature, call "get_temperature".
+    - If they request a change, first check if the room exists:
+      - If the room exists, call "set_temperature".
+      - If the room does NOT exist, first call "create_room" THEN immediately call "set_temperature".
+    - Do NOT inform the user when a room is created, just proceed with setting the temperature.
+  `;
+  
+
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! })
 
     const functions = [
       {
         name: 'get_temperature',
-        description: 'Retrieve the current temperature of a room for the logged-in user.',
+        description: 'Retrieve the current temperature of a room.',
         parameters: {
           type: 'object',
           properties: {
             room: {
               type: 'string',
-              enum: ROOMS,
-              description: 'The name of the room (e.g., bedroom, livingroom, kitchen, bathroom, office).',
+              description: 'The name of the room.',
             },
           },
           required: ['room'],
@@ -34,13 +67,12 @@ export async function POST(req: Request) {
       },
       {
         name: 'set_temperature',
-        description: 'Set a new temperature for a room belonging to the logged-in user.',
+        description: 'Set a new temperature for a specific room.',
         parameters: {
           type: 'object',
           properties: {
             room: {
               type: 'string',
-              enum: ROOMS,
               description: 'The name of the room.',
             },
             temperature: {
@@ -51,14 +83,7 @@ export async function POST(req: Request) {
           required: ['room', 'temperature'],
         },
       },
-    ];
-
-    const systemPrompt = `
-      You are a smart home assistant that manages room temperatures per user.
-      - When a user asks for a temperature, call "get_temperature".
-      - When they request a change, call "set_temperature".
-      - Ensure each request is linked to the user's ID for security.
-    `;
+    ]
 
     const response = await openai.chat.completions.create({
       model: 'gpt-4-turbo',
@@ -67,90 +92,83 @@ export async function POST(req: Request) {
         { role: 'user', content: userMessage },
       ],
       functions: functions,
-    });
+    })
 
-    const message = response.choices[0].message;
+    const message = response.choices[0].message
 
     if (message.function_call) {
-      const functionName = message.function_call.name;
-      const args = JSON.parse(message.function_call.arguments);
-
-      let functionResponse;
+      const functionName = message.function_call.name
+      const args = JSON.parse(message.function_call.arguments)
+      let functionResponse = ''
 
       if (functionName === 'get_temperature') {
-        functionResponse = await getTemperature(userId, args.room);
+        functionResponse = await getTemperature(userId, args.room)
       } else if (functionName === 'set_temperature') {
-        functionResponse = await setTemperature(userId, args.room, args.temperature);
+        functionResponse = await setTemperature(
+          userId,
+          args.room,
+          args.temperature
+        )
       } else {
-        functionResponse = 'Unknown function.';
+        functionResponse = 'Unknown function.'
       }
 
-     
-      await saveChatHistory(userId, userMessage, functionResponse);
-
-      return NextResponse.json({ message: functionResponse });
+      await saveChatHistory(userId, userMessage, functionResponse)
+      return NextResponse.json({ message: functionResponse })
     }
 
-    return NextResponse.json({ message: message.content });
+    return NextResponse.json({ message: message.content })
   } catch (error) {
-    console.error('OpenAI API Error:', error);
+    console.error('OpenAI API Error:', error)
     return NextResponse.json(
       { message: 'Server error, please try again later.' },
       { status: 500 }
-    );
+    )
   }
 }
 
-// Function to retrieve temperature for a specific user
+
 async function getTemperature(userId: string, room: string): Promise<string> {
-  if (!ROOMS.includes(room)) {
-    return `❌ Invalid room name. Please choose from: ${ROOMS.join(", ")}.`;
-  }
-
-  console.log(`🔥 Fetching temperature: User=${userId}, Room=${room}`);
-
   const { data, error } = await supabase
     .from('room_temperatures')
     .select('temperature')
-    .eq('user_id', userId) 
+    .eq('user_id', userId)
     .eq('room', room)
-    .single();
+    .single()
 
-  if (error || !data) {
-    console.error('🔥 Supabase Fetch Error:', error);
-    return `❌ No temperature data found for ${room}.`;
-  }
-
-  console.log('✅ Temperature Data:', data);
-  return `🌡️ The current temperature in ${room} is ${data.temperature}°C.`;
+  return error || !data
+    ? `❌ No temperature data found for ${room}.`
+    : `🌡️ The current temperature in ${room} is ${data.temperature}°C.`
 }
 
 
+async function setTemperature(
+  userId: string,
+  room: string,
+  temperature: number
+): Promise<string> {
+  const userRooms = await getUserRooms(userId)
 
-async function setTemperature(userId: string, room: string, temperature: number): Promise<string> {
-  if (!ROOMS.includes(room)) {
-    return `❌ Invalid room name. Please choose from: ${ROOMS.join(", ")}.`;
+  if (!userRooms.includes(room)) {
+    await createRoom(userId, room) 
   }
-
-  console.log(`🔥 Updating temperature: User=${userId}, Room=${room}, Temp=${temperature}`);
 
   const { error } = await supabase
-  .from('room_temperatures')
-  .upsert([{ user_id: userId, room, temperature }], { onConflict: "room" }); // Use only "room" if that's your constraint
+    .from('room_temperatures')
+    .upsert([{ user_id: userId, room, temperature }])
 
-
-  if (error) {
-    console.error('🔥 Supabase Update Error:', error);
-    return `❌ Failed to update ${room}: ${error.message}`;
-  }
-
-  return `✅ The temperature in ${room} has been set to ${temperature}°C.`;
+  return error
+    ? `❌ Failed to update temperature for ${room}.`
+    : `✅ The temperature in ${room} has been set to ${temperature}°C.`
 }
 
 
-
-
-
-async function saveChatHistory(userId: string, message: string, response: string) {
-  await supabase.from("chat_history").insert([{ user_id: userId, message, response }]);
+async function saveChatHistory(
+  userId: string,
+  message: string,
+  response: string
+) {
+  await supabase
+    .from('chat_history')
+    .insert([{ user_id: userId, message, response }])
 }
