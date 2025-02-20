@@ -17,10 +17,19 @@ async function createRoom(userId: string, room: string) {
   const userRooms = await getUserRooms(userId)
 
   if (!userRooms.includes(room)) {
-    await supabase
+    const { error } = await supabase
       .from('room_temperatures')
-      .insert([{ user_id: userId, room, temperature: 22 }]) 
+      .upsert([{ user_id: userId, room, temperature: 22 }], {
+        onConflict: 'user_id, room',
+      }) 
+
+    if (error) {
+      console.error('🔥 Error creating room:', error)
+      return `❌ Failed to create room ${room}.`
+    }
+    return null 
   }
+  return null 
 }
 
 export async function POST(req: Request) {
@@ -34,19 +43,19 @@ export async function POST(req: Request) {
       )
     }
 
-  
+    
     const userRooms = await getUserRooms(userId)
 
     const systemPrompt = `
-    You are a smart home assistant that manages room temperatures per user.
-    - Available rooms for this user: ${userRooms.length > 0 ? userRooms.join(', ') : 'None'}.
-    - If the user asks for a temperature, call "get_temperature".
-    - If they request a change, first check if the room exists:
-      - If the room exists, call "set_temperature".
-      - If the room does NOT exist, first call "create_room" THEN immediately call "set_temperature".
-    - Do NOT inform the user when a room is created, just proceed with setting the temperature.
-  `;
-  
+      You are a smart home assistant that manages room temperatures per user.
+      - Available rooms for this user: ${
+        userRooms.length > 0 ? userRooms.join(', ') : 'None'
+      }.
+      - If the user asks for a temperature, call "get_temperature".
+      - If they request a change, call "set_temperature".
+      - If the user mentions a room that does not exist, call "create_room" before setting a temperature.
+      - If they request a change in the future (e.g., "in 5 minutes"), pass the "delayMinutes" parameter to "set_temperature".
+    `
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! })
 
@@ -79,8 +88,26 @@ export async function POST(req: Request) {
               type: 'number',
               description: 'New temperature in Celsius.',
             },
+            delayMinutes: {
+              type: 'number',
+              description: 'Delay in minutes before changing temperature.',
+            },
           },
           required: ['room', 'temperature'],
+        },
+      },
+      {
+        name: 'create_room',
+        description: 'Create a new room for the user.',
+        parameters: {
+          type: 'object',
+          properties: {
+            room: {
+              type: 'string',
+              description: 'The name of the room to create.',
+            },
+          },
+          required: ['room'],
         },
       },
     ]
@@ -99,7 +126,7 @@ export async function POST(req: Request) {
     if (message.function_call) {
       const functionName = message.function_call.name
       const args = JSON.parse(message.function_call.arguments)
-      let functionResponse = ''
+      let functionResponse
 
       if (functionName === 'get_temperature') {
         functionResponse = await getTemperature(userId, args.room)
@@ -107,14 +134,20 @@ export async function POST(req: Request) {
         functionResponse = await setTemperature(
           userId,
           args.room,
-          args.temperature
+          args.temperature,
+          args.delayMinutes || 0
         )
+      } else if (functionName === 'create_room') {
+        functionResponse = await createRoom(userId, args.room)
       } else {
         functionResponse = 'Unknown function.'
       }
 
-      await saveChatHistory(userId, userMessage, functionResponse)
-      return NextResponse.json({ message: functionResponse })
+      if (functionResponse !== null) {
+        await saveChatHistory(userId, userMessage, functionResponse)
+        return NextResponse.json({ message: functionResponse })
+      }
+      return NextResponse.json({ message: '' })
     }
 
     return NextResponse.json({ message: message.content })
@@ -129,6 +162,12 @@ export async function POST(req: Request) {
 
 
 async function getTemperature(userId: string, room: string): Promise<string> {
+  const userRooms = await getUserRooms(userId)
+
+  if (!userRooms.includes(room)) {
+    return `❌ Room "${room}" does not exist. Please create it first.`
+  }
+
   const { data, error } = await supabase
     .from('room_temperatures')
     .select('temperature')
@@ -136,33 +175,62 @@ async function getTemperature(userId: string, room: string): Promise<string> {
     .eq('room', room)
     .single()
 
-  return error || !data
-    ? `❌ No temperature data found for ${room}.`
-    : `🌡️ The current temperature in ${room} is ${data.temperature}°C.`
-}
-
-
-async function setTemperature(
-  userId: string,
-  room: string,
-  temperature: number
-): Promise<string> {
-  const userRooms = await getUserRooms(userId)
-
-  if (!userRooms.includes(room)) {
-    await createRoom(userId, room) 
+  if (error || !data) {
+    return `❌ No temperature data found for ${room}.`
   }
 
+  return `🌡️ The current temperature in ${room} is ${data.temperature}°C.`
+}
+
+async function setTemperature(userId: string, room: string, temperature: number, delayMinutes?: number): Promise<string> {
+  let userRooms = await getUserRooms(userId);
+
+
+  if (!userRooms.includes(room)) {
+    console.log(`🏠 Room "${room}" does not exist. Creating it now...`);
+    await createRoom(userId, room);  
+    userRooms = await getUserRooms(userId); 
+  }
+
+  
+  if (delayMinutes && delayMinutes > 0) {
+    console.log(`⏳ Scheduled temperature change for ${room} in ${delayMinutes} minutes.`);
+
+    setTimeout(async () => {
+      console.log(`🔥 Applying scheduled temperature change: ${room} → ${temperature}°C`);
+      const { error } = await supabase
+        .from('room_temperatures')
+        .update({ temperature })  
+        .eq('user_id', userId)
+        .eq('room', room);
+
+      if (error) {
+        console.error('❌ Scheduled temperature update failed:', error);
+      } else {
+        console.log(`✅ Temperature in ${room} updated to ${temperature}°C`);
+      }
+    }, delayMinutes * 60 * 1000);
+
+    return `⏳ The temperature in ${room} will be changed to ${temperature}°C in ${delayMinutes} minutes.`;
+  }
+
+
+  console.log(`🔥 Changing temperature immediately: ${room} → ${temperature}°C`);
   const { error } = await supabase
     .from('room_temperatures')
-    .upsert([{ user_id: userId, room, temperature }])
+    .update({ temperature })  
+    .eq('room', room);
 
-  return error
-    ? `❌ Failed to update temperature for ${room}.`
-    : `✅ The temperature in ${room} has been set to ${temperature}°C.`
+  if (error) {
+    console.error(`❌ Failed to update temperature for ${room}:`, error);
+    return `❌ Failed to update temperature for ${room}.`;
+  }
+
+  return `✅ The temperature in ${room} has been set to ${temperature}°C.`;
 }
 
 
+// ✅ Function to save chat history
 async function saveChatHistory(
   userId: string,
   message: string,
