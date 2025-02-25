@@ -2,7 +2,7 @@ import OpenAI from 'openai'
 import { NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabaseClient'
 
-
+// ✅ Fonction pour récupérer les chambres de l'utilisateur
 async function getUserRooms(userId: string): Promise<string[]> {
   const { data, error } = await supabase
     .from('room_temperatures')
@@ -12,25 +12,106 @@ async function getUserRooms(userId: string): Promise<string[]> {
   return error || !data ? [] : data.map((room) => room.room)
 }
 
-
+// ✅ Fonction pour créer une chambre si elle n'existe pas
 async function createRoom(userId: string, room: string) {
   const userRooms = await getUserRooms(userId)
 
   if (!userRooms.includes(room)) {
     const { error } = await supabase
       .from('room_temperatures')
-      .upsert([{ user_id: userId, room, temperature: 22 }], {
-        onConflict: 'user_id, room',
-      }) 
+      .insert([{ user_id: userId, room, temperature: 22 }]) // Température par défaut : 22°C
 
     if (error) {
       console.error('🔥 Error creating room:', error)
       return `❌ Failed to create room ${room}.`
     }
-    return null 
   }
-  return null 
 }
+
+// ✅ Fonction pour obtenir la température actuelle d'une chambre
+async function getTemperature(userId: string, room: string): Promise<string> {
+  const userRooms = await getUserRooms(userId)
+
+  if (!userRooms.includes(room)) {
+    return `❌ Room "${room}" does not exist.`
+  }
+
+  const { data, error } = await supabase
+    .from('room_temperatures')
+    .select('temperature')
+    .eq('user_id', userId)
+    .eq('room', room)
+    .single()
+
+  if (error || !data) {
+    return `❌ No temperature data found for ${room}.`
+  }
+
+  return `🌡️ The current temperature in ${room} is ${data.temperature}°C.`
+}
+
+
+async function setTemperature(
+  userId: string,
+  room: string,
+  temperature: number,
+  delayMinutes?: number
+): Promise<string> {
+  const userRooms = await getUserRooms(userId)
+
+  if (!userRooms.includes(room)) {
+    await createRoom(userId, room) // Crée la room si elle n'existe pas
+  }
+
+  if (delayMinutes && delayMinutes > 0) {
+    const executeAt = new Date(Date.now() + delayMinutes * 60 * 1000) // Calcul de l'heure d'exécution
+
+    const { error } = await supabase
+      .from('scheduled_temperatures')
+      .insert([{ user_id: userId, room, temperature, execute_at: executeAt }])
+
+    if (error) {
+      console.error('❌ Error scheduling temperature update:', error)
+      return `❌ Failed to schedule temperature change for ${room}.`
+    }
+
+    return `⏳ The temperature in ${room} will be changed to ${temperature}°C at ${executeAt.toLocaleTimeString()}.`
+  }
+
+  return await applyTemperatureChange(userId, room, temperature)
+}
+
+
+async function applyTemperatureChange(
+  userId: string,
+  room: string,
+  temperature: number
+): Promise<string> {
+  const { error } = await supabase
+    .from('room_temperatures')
+    .update({ temperature })
+    .eq('user_id', userId)
+    .eq('room', room)
+
+  if (error) {
+    console.error(`❌ Failed to update temperature for ${room}:`, error)
+    return `❌ Failed to update temperature for ${room}.`
+  }
+
+  return `✅ The temperature in ${room} has been set to ${temperature}°C.`
+}
+
+
+async function saveChatHistory(
+  userId: string,
+  message: string,
+  response: string
+) {
+  await supabase
+    .from('chat_history')
+    .insert([{ user_id: userId, message, response }])
+}
+
 
 export async function POST(req: Request) {
   try {
@@ -143,7 +224,7 @@ export async function POST(req: Request) {
         functionResponse = 'Unknown function.'
       }
 
-      if (functionResponse !== null) {
+      if (functionResponse !== null && functionResponse !== undefined) {
         await saveChatHistory(userId, userMessage, functionResponse)
         return NextResponse.json({ message: functionResponse })
       }
@@ -158,85 +239,4 @@ export async function POST(req: Request) {
       { status: 500 }
     )
   }
-}
-
-
-async function getTemperature(userId: string, room: string): Promise<string> {
-  const userRooms = await getUserRooms(userId)
-
-  if (!userRooms.includes(room)) {
-    return `❌ Room "${room}" does not exist. Please create it first.`
-  }
-
-  const { data, error } = await supabase
-    .from('room_temperatures')
-    .select('temperature')
-    .eq('user_id', userId)
-    .eq('room', room)
-    .single()
-
-  if (error || !data) {
-    return `❌ No temperature data found for ${room}.`
-  }
-
-  return `🌡️ The current temperature in ${room} is ${data.temperature}°C.`
-}
-
-async function setTemperature(userId: string, room: string, temperature: number, delayMinutes?: number): Promise<string> {
-  let userRooms = await getUserRooms(userId);
-
-
-  if (!userRooms.includes(room)) {
-    console.log(`🏠 Room "${room}" does not exist. Creating it now...`);
-    await createRoom(userId, room);  
-    userRooms = await getUserRooms(userId); 
-  }
-
-  
-  if (delayMinutes && delayMinutes > 0) {
-    console.log(`⏳ Scheduled temperature change for ${room} in ${delayMinutes} minutes.`);
-
-    setTimeout(async () => {
-      console.log(`🔥 Applying scheduled temperature change: ${room} → ${temperature}°C`);
-      const { error } = await supabase
-        .from('room_temperatures')
-        .update({ temperature })  
-        .eq('user_id', userId)
-        .eq('room', room);
-
-      if (error) {
-        console.error('❌ Scheduled temperature update failed:', error);
-      } else {
-        console.log(`✅ Temperature in ${room} updated to ${temperature}°C`);
-      }
-    }, delayMinutes * 60 * 1000);
-
-    return `⏳ The temperature in ${room} will be changed to ${temperature}°C in ${delayMinutes} minutes.`;
-  }
-
-
-  console.log(`🔥 Changing temperature immediately: ${room} → ${temperature}°C`);
-  const { error } = await supabase
-    .from('room_temperatures')
-    .update({ temperature })  
-    .eq('room', room);
-
-  if (error) {
-    console.error(`❌ Failed to update temperature for ${room}:`, error);
-    return `❌ Failed to update temperature for ${room}.`;
-  }
-
-  return `✅ The temperature in ${room} has been set to ${temperature}°C.`;
-}
-
-
-// ✅ Function to save chat history
-async function saveChatHistory(
-  userId: string,
-  message: string,
-  response: string
-) {
-  await supabase
-    .from('chat_history')
-    .insert([{ user_id: userId, message, response }])
 }

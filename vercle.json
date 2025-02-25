@@ -1,0 +1,13 @@
+{
+  "functions": {
+    "api/cron.ts": {
+      "runtime": "edge"
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron",
+      "schedule": "*/1 * * * *"
+    }
+  ]
+}
