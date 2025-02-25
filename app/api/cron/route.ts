@@ -1,4 +1,4 @@
-import cron from 'node-cron'
+import { NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabaseClient'
 
 // ✅ Fonction pour mettre à jour les températures planifiées
@@ -11,16 +11,19 @@ async function processScheduledTemperatureUpdates() {
   const { data, error } = await supabase
     .from('scheduled_temperatures')
     .select('*')
-    .lte('scheduled_time', currentTime) // Vérifie si l'heure actuelle dépasse le temps prévu
+    .lte('scheduled_time', currentTime)
 
   if (error) {
     console.error('❌ Error fetching scheduled updates:', error)
-    return
+    return NextResponse.json(
+      { message: 'Error fetching scheduled updates' },
+      { status: 500 }
+    )
   }
 
   if (!data || data.length === 0) {
     console.log('✅ No scheduled temperature updates at this time.')
-    return
+    return NextResponse.json({ message: 'No scheduled updates' })
   }
 
   for (const entry of data) {
@@ -43,12 +46,11 @@ async function processScheduledTemperatureUpdates() {
     // 🗑️ Supprimer l'entrée après exécution
     await supabase.from('scheduled_temperatures').delete().eq('id', id)
   }
+
+  return NextResponse.json({ message: 'Scheduled temperature updates applied' })
 }
 
-// ✅ Planifier l'exécution du cron job toutes les minutes
-cron.schedule('* * * * *', () => {
-  console.log('🔄 Running scheduled temperature update check...')
-  processScheduledTemperatureUpdates()
-})
-
-console.log('✅ Cron job started. Running every minute.')
+// ✅ Route GET pour exécuter manuellement le cron
+export async function GET() {
+  return await processScheduledTemperatureUpdates()
+}
