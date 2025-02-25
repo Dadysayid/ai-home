@@ -11,12 +11,12 @@ async function processScheduledTemperatureUpdates() {
   const { data, error } = await supabase
     .from('scheduled_temperatures')
     .select('*')
-    .lte('scheduled_time', currentTime)
+    .lte('execute_at', currentTime) // ⚠️ Vérifie que "execute_at" est bien le bon nom de la colonne dans ta BDD
 
   if (error) {
     console.error('❌ Error fetching scheduled updates:', error)
     return NextResponse.json(
-      { message: 'Error fetching scheduled updates' },
+      { error: 'Error fetching scheduled updates' },
       { status: 500 }
     )
   }
@@ -52,5 +52,13 @@ async function processScheduledTemperatureUpdates() {
 
 // ✅ Route GET pour exécuter manuellement le cron
 export async function GET() {
-  return await processScheduledTemperatureUpdates()
+  try {
+    return await processScheduledTemperatureUpdates()
+  } catch (error) {
+    console.error('❌ Error executing cron job:', error)
+    return NextResponse.json(
+      { error: 'Internal Server Error' },
+      { status: 500 }
+    )
+  }
 }
